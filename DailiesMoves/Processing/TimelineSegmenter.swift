@@ -93,16 +93,16 @@ enum TimelineSegmenter {
 
         if mergedDwells.isEmpty {
             if let first = trackSamples.first, let last = trackSamples.last, last.timestamp > first.timestamp {
-                segments.append(makeMoveSegment(
+                segments.append(contentsOf: makeMoveSegments(
                     localDayKey: localDayKey,
                     start: max(dayInterval.start, first.timestamp),
                     end: min(dayInterval.end, last.timestamp),
                     samples: trackSamples,
                     activityTypes: activityTypes,
-                    motionHints: motionHints,
-                    sortOrder: 0
+                    motionHints: motionHints
                 ))
             }
+            for i in segments.indices { segments[i].sortOrder = i }
             return segments
         }
 
@@ -111,14 +111,13 @@ enum TimelineSegmenter {
            firstSample.timestamp < mergedDwells[0].start.addingTimeInterval(-config.minMoveDuration) {
             let leadSamples = trackSamples.filter { $0.timestamp <= mergedDwells[0].start }
             if hasMeaningfulMovement(samples: leadSamples, minDistance: config.stationaryRadiusMeters) {
-                segments.append(makeMoveSegment(
+                segments.append(contentsOf: makeMoveSegments(
                     localDayKey: localDayKey,
                     start: max(dayInterval.start, firstSample.timestamp),
                     end: mergedDwells[0].start,
                     samples: leadSamples,
                     activityTypes: activityTypes,
-                    motionHints: motionHints,
-                    sortOrder: segments.count
+                    motionHints: motionHints
                 ))
             }
         }
@@ -140,14 +139,13 @@ enum TimelineSegmenter {
                     let moveSamples = trackSamples.filter {
                         $0.timestamp >= dwell.end && $0.timestamp <= nextDwell.start
                     }
-                    segments.append(makeMoveSegment(
+                    segments.append(contentsOf: makeMoveSegments(
                         localDayKey: localDayKey,
                         start: dwell.end,
                         end: nextDwell.start,
                         samples: moveSamples,
                         activityTypes: activityTypes,
-                        motionHints: motionHints,
-                        sortOrder: segments.count
+                        motionHints: motionHints
                     ))
                 } else if gap > 0 {
                     segments[segments.count - 1].endDate = nextDwell.start
@@ -161,14 +159,13 @@ enum TimelineSegmenter {
            lastSample.timestamp > lastDwell.end.addingTimeInterval(config.minMoveDuration) {
             let trailSamples = trackSamples.filter { $0.timestamp >= lastDwell.end }
             if hasMeaningfulMovement(samples: trailSamples, minDistance: config.stationaryRadiusMeters) {
-                segments.append(makeMoveSegment(
+                segments.append(contentsOf: makeMoveSegments(
                     localDayKey: localDayKey,
                     start: lastDwell.end,
                     end: min(dayInterval.end, lastSample.timestamp),
                     samples: trailSamples,
                     activityTypes: activityTypes,
-                    motionHints: motionHints,
-                    sortOrder: segments.count
+                    motionHints: motionHints
                 ))
             }
         }
@@ -316,16 +313,113 @@ enum TimelineSegmenter {
             }
 
             guard vEnd.timeIntervalSince(vStart) >= config.minStationaryDuration else { continue }
-            dwells.append(RawDwell(
+
+            // Refine coarse CLVisit boundaries against real high-accuracy GPS samples:
+            // CLVisit often starts/ends 2-5 min early/late or merges two nearby stops (e.g. mall + condo 250m apart).
+            let refinedDwells = refineVisitAgainstTrackSamples(
                 start: vStart,
                 end: vEnd,
-                latitude: visit.latitude,
-                longitude: visit.longitude,
-                weight: 5
-            ))
+                visitCoord: visit.coordinate,
+                visitAccuracy: visit.horizontalAccuracy,
+                cleanSamples: cleanSamples,
+                config: config
+            )
+            dwells.append(contentsOf: refinedDwells)
         }
 
         return dwells
+    }
+
+    /// Trims a coarse `CLVisit` so it never swallows high-accuracy moving GPS tracks (`speed >= 1.0 m/s`)
+    /// or real stops located > 140m away from the visit centroid.
+    private static func refineVisitAgainstTrackSamples(
+        start: Date,
+        end: Date,
+        visitCoord: CLLocationCoordinate2D,
+        visitAccuracy: Double,
+        cleanSamples: [RawLocationSample],
+        config: Configuration
+    ) -> [RawDwell] {
+        let insideSamples = cleanSamples.filter {
+            $0.timestamp >= start && $0.timestamp <= end && $0.horizontalAccuracy <= 35
+        }
+        guard !insideSamples.isEmpty else {
+            return [RawDwell(start: start, end: end, latitude: visitCoord.latitude, longitude: visitCoord.longitude, weight: 5)]
+        }
+
+        let awayThreshold = 140.0
+        let settleRadius = 90.0
+
+        // Find the earliest timestamp where the user actually settled near `visitCoord`
+        // (within `settleRadius` AND not followed by a >140m stationary stay elsewhere).
+        let farStaySamples = insideSamples.filter {
+            $0.distance(to: visitCoord) > awayThreshold && $0.speed < 1.1
+        }
+
+        var result: [RawDwell] = []
+        var searchStart = start
+
+        // If high-accuracy GPS proves the user dwelled > 140m away from a coarse CLVisit
+        // (e.g. CLVisit lumped Central Chiangmai + Escent Condo into one visit), carve out that real dwell!
+        if farStaySamples.count >= 2,
+           let firstFar = farStaySamples.first,
+           let lastFar = farStaySamples.last {
+            let farCoord = CLLocationCoordinate2D(
+                latitude: average(farStaySamples.map(\.latitude)),
+                longitude: average(farStaySamples.map(\.longitude))
+            )
+            // Extend far dwell up to the next movement away from farCoord (or return walk).
+            let nextDeparture = insideSamples.first {
+                $0.timestamp > lastFar.timestamp && ($0.distance(to: farCoord) > 75 || $0.speed >= 1.0)
+            }?.timestamp ?? lastFar.timestamp
+            let farEnd = max(lastFar.timestamp, nextDeparture)
+            if farEnd.timeIntervalSince(firstFar.timestamp) >= config.minStationaryDuration {
+                result.append(RawDwell(
+                    start: firstFar.timestamp,
+                    end: farEnd,
+                    latitude: farCoord.latitude,
+                    longitude: farCoord.longitude,
+                    weight: max(5, farStaySamples.count)
+                ))
+                searchStart = farEnd
+            }
+        }
+
+        // Now trim leading moving/far samples for the primary visit after `searchStart`.
+        let remainingSamples = insideSamples.filter { $0.timestamp >= searchStart }
+        var trimmedStart = searchStart
+        for sample in remainingSamples {
+            let isNear = sample.distance(to: visitCoord) <= settleRadius
+            let isSlow = sample.speed < 1.0
+            if isNear && isSlow {
+                break
+            }
+            trimmedStart = sample.timestamp
+        }
+
+        // Trim trailing samples near the end of the visit (within 10 min of `end`) where user already started moving away.
+        // Never trim across a long sleep gap where no GPS points were recorded!
+        var trimmedEnd = end
+        for sample in remainingSamples.reversed() {
+            guard end.timeIntervalSince(sample.timestamp) <= 600 else { break }
+            let isNear = sample.distance(to: visitCoord) <= settleRadius
+            let isSlow = sample.speed < 1.0
+            if isNear && isSlow {
+                break
+            }
+            trimmedEnd = sample.timestamp
+        }
+
+        if trimmedEnd.timeIntervalSince(trimmedStart) >= config.minStationaryDuration {
+            result.append(RawDwell(
+                start: trimmedStart,
+                end: trimmedEnd,
+                latitude: visitCoord.latitude,
+                longitude: visitCoord.longitude,
+                weight: 5
+            ))
+        }
+        return result
     }
 
     // MARK: - Dwell Detection
@@ -463,6 +557,192 @@ enum TimelineSegmenter {
         )
     }
 
+    /// Creates one or more Move segments, automatically splitting sustained vehicle <-> walking transitions
+    /// (e.g. parking a scooter and walking 300m into a mall) without splitting on brief traffic lights.
+    private static func makeMoveSegments(
+        localDayKey: String,
+        start: Date,
+        end: Date,
+        samples: [RawLocationSample],
+        activityTypes: [ActivityType],
+        motionHints: [MotionActivityHintService.MotionInterval]
+    ) -> [TimelineSegment] {
+        let splitDates = detectActivityTransitionDates(
+            start: start,
+            end: end,
+            samples: samples
+        )
+
+        guard !splitDates.isEmpty else {
+            return [makeMoveSegment(
+                localDayKey: localDayKey,
+                start: start,
+                end: end,
+                samples: samples,
+                activityTypes: activityTypes,
+                motionHints: motionHints,
+                sortOrder: 0
+            )]
+        }
+
+        var boundaries = [start] + splitDates + [end]
+        boundaries.sort()
+
+        var result: [TimelineSegment] = []
+        for idx in 0..<(boundaries.count - 1) {
+            let subStart = boundaries[idx]
+            let subEnd = boundaries[idx + 1]
+            guard subEnd.timeIntervalSince(subStart) >= 30 else { continue }
+            let subSamples = samples.filter { $0.timestamp >= subStart && $0.timestamp <= subEnd }
+            result.append(makeMoveSegment(
+                localDayKey: localDayKey,
+                start: subStart,
+                end: subEnd,
+                samples: subSamples,
+                activityTypes: activityTypes,
+                motionHints: motionHints,
+                sortOrder: idx
+            ))
+        }
+        return result.isEmpty ? [makeMoveSegment(
+            localDayKey: localDayKey,
+            start: start,
+            end: end,
+            samples: samples,
+            activityTypes: activityTypes,
+            motionHints: motionHints,
+            sortOrder: 0
+        )] : result
+    }
+
+    private enum SpeedRegime: Equatable {
+        case walking
+        case vehicle
+    }
+
+    /// Detects sustained transitions between walking (< 2.5 m/s) and vehicle/scooter (>= 3.2 m/s).
+    /// Requires each sub-regime to last >= 90s and cover >= 80m so red lights never cause false splits.
+    private static func detectActivityTransitionDates(
+        start: Date,
+        end: Date,
+        samples: [RawLocationSample]
+    ) -> [Date] {
+        guard samples.count >= 12, end.timeIntervalSince(start) >= 240 else { return [] }
+
+        // 1. Compute smoothed speed (±20s window median) for each sample.
+        var pointSpeeds: [Double] = Array(repeating: 0, count: samples.count)
+        for i in samples.indices {
+            if samples[i].speed >= 0 && samples[i].speed < 80 {
+                pointSpeeds[i] = samples[i].speed
+            } else if i > 0 {
+                let dt = samples[i].timestamp.timeIntervalSince(samples[i - 1].timestamp)
+                pointSpeeds[i] = dt > 0.5 ? min(80, samples[i].distance(to: samples[i - 1]) / dt) : 0
+            }
+        }
+
+        var regimes: [SpeedRegime?] = Array(repeating: nil, count: samples.count)
+        for i in samples.indices {
+            let t = samples[i].timestamp
+            var windowSpeeds: [Double] = []
+            for j in samples.indices {
+                if abs(samples[j].timestamp.timeIntervalSince(t)) <= 20 {
+                    windowSpeeds.append(pointSpeeds[j])
+                }
+            }
+            windowSpeeds.sort()
+            let med = windowSpeeds[windowSpeeds.count / 2]
+            if med >= 3.2 {
+                regimes[i] = .vehicle
+            } else if med >= 0.35 && med < 2.5 {
+                regimes[i] = .walking
+            } else {
+                regimes[i] = nil // red light / hysteresis band
+            }
+        }
+
+        // Fill nil gaps (red lights / hysteresis) from surrounding regime.
+        var lastKnown: SpeedRegime?
+        for i in regimes.indices {
+            if let r = regimes[i] {
+                lastKnown = r
+            } else {
+                regimes[i] = lastKnown
+            }
+        }
+        var nextKnown: SpeedRegime?
+        for i in regimes.indices.reversed() {
+            if let r = regimes[i] {
+                nextKnown = r
+            } else {
+                regimes[i] = nextKnown
+            }
+        }
+
+        guard regimes.first != nil else { return [] }
+
+        // 2. Group consecutive runs of identical regime.
+        struct Run {
+            var regime: SpeedRegime
+            var startIdx: Int
+            var endIdx: Int
+        }
+        var runs: [Run] = []
+        for i in regimes.indices {
+            guard let r = regimes[i] else { continue }
+            if var last = runs.last, last.regime == r {
+                last.endIdx = i
+                runs[runs.count - 1] = last
+            } else {
+                runs.append(Run(regime: r, startIdx: i, endIdx: i))
+            }
+        }
+
+        // 3. Absorb tiny noisy runs (< 90s OR < 80m) into neighbors.
+        func runMetrics(_ run: Run) -> (duration: TimeInterval, distance: Double) {
+            let dur = samples[run.endIdx].timestamp.timeIntervalSince(samples[run.startIdx].timestamp)
+            var dist: Double = 0
+            if run.endIdx > run.startIdx {
+                for k in (run.startIdx + 1)...run.endIdx {
+                    dist += samples[k].distance(to: samples[k - 1])
+                }
+            }
+            return (dur, dist)
+        }
+
+        var changed = true
+        while changed && runs.count > 1 {
+            changed = false
+            for idx in runs.indices {
+                let m = runMetrics(runs[idx])
+                if m.duration < 90 || m.distance < 80 {
+                    if idx > 0 {
+                        runs[idx - 1].endIdx = runs[idx].endIdx
+                        runs.remove(at: idx)
+                    } else if idx + 1 < runs.count {
+                        runs[idx + 1].startIdx = runs[idx].startIdx
+                        runs.remove(at: idx)
+                    }
+                    // Merge adjacent runs of same regime after removal.
+                    var compacted: [Run] = []
+                    for r in runs {
+                        if var prev = compacted.last, prev.regime == r.regime {
+                            prev.endIdx = r.endIdx
+                            compacted[compacted.count - 1] = prev
+                        } else {
+                            compacted.append(r)
+                        }
+                    }
+                    runs = compacted
+                    changed = true
+                    break
+                }
+            }
+        }
+
+        guard runs.count >= 2 else { return [] }
+        return runs.dropFirst().map { samples[$0.startIdx].timestamp }
+    }
+
     private static func makeMoveSegment(
         localDayKey: String,
         start: Date,
@@ -499,7 +779,7 @@ enum TimelineSegmenter {
         savedPlaces
             .compactMap { place -> (SavedPlace, CLLocationDistance)? in
                 let dist = place.distance(to: coordinate)
-                let threshold = max(place.radiusMeters, 80)
+                let threshold = max(place.radiusMeters, 110)
                 guard dist <= threshold else { return nil }
                 return (place, dist)
             }

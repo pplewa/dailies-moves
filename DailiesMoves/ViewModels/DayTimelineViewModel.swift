@@ -256,38 +256,70 @@ final class DayTimelineViewModel {
         hasUnsavedChanges = true
     }
 
-    func splitSegment(segmentID: String, at splitDate: Date) {
+    func splitSegment(
+        segmentID: String,
+        at splitDate: Date,
+        firstKind: TimelineSegment.Kind? = nil,
+        firstActivityTypeID: String? = nil,
+        secondKind: TimelineSegment.Kind? = nil,
+        secondActivityTypeID: String? = nil
+    ) {
         guard let idx = segments.firstIndex(where: { $0.id == segmentID }) else { return }
         let original = segments[idx]
-        guard splitDate > original.startDate.addingTimeInterval(15),
-              splitDate < original.endDate.addingTimeInterval(-15) else { return }
+        guard splitDate > original.startDate.addingTimeInterval(5),
+              splitDate < original.endDate.addingTimeInterval(-5) else { return }
+
+        let resolvedFirstKind = firstKind ?? original.kind
+        let resolvedSecondKind = secondKind ?? original.kind
 
         var firstHalf = original
+        firstHalf.kind = resolvedFirstKind
         firstHalf.endDate = splitDate
+        firstHalf.isConfirmed = true
+        if resolvedFirstKind == .move {
+            firstHalf.placeID = nil
+            firstHalf.placeName = nil
+            firstHalf.activityTypeID = firstActivityTypeID ?? original.activityTypeID ?? activityTypes.first?.id ?? "walking"
+        } else {
+            firstHalf.activityTypeID = nil
+            if let c1 = centroidForWindow(start: firstHalf.startDate, end: firstHalf.endDate) {
+                firstHalf.latitude = c1.latitude
+                firstHalf.longitude = c1.longitude
+                if firstHalf.placeName == nil, let matched = TimelineSegmenter.bestMatchingPlace(for: c1, from: savedPlaces) {
+                    firstHalf.placeID = matched.id
+                    firstHalf.placeName = matched.name
+                }
+            }
+        }
 
         var secondHalf = TimelineSegment(
             id: UUID().uuidString,
             localDayKey: selectedDayKey,
-            kind: original.kind,
+            kind: resolvedSecondKind,
             startDate: splitDate,
             endDate: original.endDate,
-            activityTypeID: original.activityTypeID,
-            placeID: original.placeID,
-            placeName: original.placeName,
+            activityTypeID: resolvedSecondKind == .move
+                ? (secondActivityTypeID ?? original.activityTypeID ?? activityTypes.first?.id ?? "walking")
+                : nil,
+            placeID: resolvedSecondKind == .stationary ? original.placeID : nil,
+            placeName: resolvedSecondKind == .stationary ? original.placeName : nil,
             latitude: original.latitude,
             longitude: original.longitude,
-            isConfirmed: false,
+            isConfirmed: true,
             sortOrder: idx + 1
         )
 
-        if original.kind == .stationary {
-            if let c1 = centroidForWindow(start: firstHalf.startDate, end: firstHalf.endDate) {
-                firstHalf.latitude = c1.latitude
-                firstHalf.longitude = c1.longitude
-            }
+        if resolvedSecondKind == .stationary {
             if let c2 = centroidForWindow(start: secondHalf.startDate, end: secondHalf.endDate) {
                 secondHalf.latitude = c2.latitude
                 secondHalf.longitude = c2.longitude
+                if let matched = TimelineSegmenter.bestMatchingPlace(for: c2, from: savedPlaces) {
+                    secondHalf.placeID = matched.id
+                    secondHalf.placeName = matched.name
+                } else if original.kind == .move {
+                    secondHalf.placeID = nil
+                    secondHalf.placeName = nil
+                }
             }
         }
 
@@ -295,6 +327,18 @@ final class DayTimelineViewModel {
         segments.insert(secondHalf, at: idx + 1)
         reindexSortOrders()
         hasUnsavedChanges = true
+    }
+
+    /// Returns cleaned chronological GPS trackpoints belonging to a segment (for map scrubbing/splitting).
+    func cleanSamples(for segment: TimelineSegment) -> [RawLocationSample] {
+        let filtered = rawSamples.filter {
+            $0.source != .visitAnchor
+                && $0.horizontalAccuracy >= 0
+                && $0.horizontalAccuracy <= 100
+                && $0.timestamp >= segment.startDate
+                && $0.timestamp <= segment.endDate
+        }
+        return TimelineSegmenter.removeTeleportSpikes(filtered)
     }
 
     func deleteSegment(segmentID: String) {

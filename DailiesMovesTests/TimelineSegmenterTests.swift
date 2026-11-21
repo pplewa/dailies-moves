@@ -144,6 +144,55 @@ final class TimelineSegmenterTests: XCTestCase {
         XCTAssertEqual(segments[6].placeName, "Escent Condo")
     }
 
+    func testAutoSplitsVehicleToWalkingTransition() {
+        let utc = TimeZone(secondsFromGMT: 0)!
+        let dayStart = ISO8601DateFormatter().date(from: "2026-11-21T00:00:00Z")!
+        let dayInterval = DateInterval(start: dayStart, duration: 86400)
+        let tStart = dayStart.addingTimeInterval(2 * 3600)
+
+        var samples: [RawLocationSample] = []
+        var lat = 18.8000
+        var id: Int64 = 1
+
+        // 6 minutes riding a scooter/car at ~9 m/s (~3.2 km)
+        for step in 0..<36 {
+            let ts = tStart.addingTimeInterval(Double(step) * 10)
+            lat += 0.00081 // ~90m per 10s
+            samples.append(RawLocationSample(
+                id: id, timestamp: ts, latitude: lat, longitude: 99.0000,
+                horizontalAccuracy: 5, altitude: 310, speed: 9.0, course: 0, source: .activeGPS
+            ))
+            id += 1
+        }
+
+        // Immediately transition (no stationary dwell!) to 4 minutes of walking at ~1.3 m/s (~310 m)
+        let tWalkStart = tStart.addingTimeInterval(360)
+        for step in 1...24 {
+            let ts = tWalkStart.addingTimeInterval(Double(step) * 10)
+            lat += 0.00012 // ~13m per 10s
+            samples.append(RawLocationSample(
+                id: id, timestamp: ts, latitude: lat, longitude: 99.0000,
+                horizontalAccuracy: 5, altitude: 310, speed: 1.3, course: 0, source: .activeGPS
+            ))
+            id += 1
+        }
+
+        let segments = TimelineSegmenter.segment(
+            localDayKey: DateFormatting.localDayKey(for: dayStart, timeZone: utc),
+            dayInterval: dayInterval,
+            samples: samples,
+            visits: [],
+            savedPlaces: [],
+            activityTypes: ActivityType.defaults
+        )
+
+        XCTAssertEqual(segments.count, 2)
+        XCTAssertEqual(segments[0].kind, .move)
+        XCTAssertEqual(segments[0].activityTypeID, "car")
+        XCTAssertEqual(segments[1].kind, .move)
+        XCTAssertEqual(segments[1].activityTypeID, "walking")
+    }
+
     private func makeSample(id: Int64, ts: Date, lat: Double, lon: Double) -> RawLocationSample {
         RawLocationSample(
             id: id,

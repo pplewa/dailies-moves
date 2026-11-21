@@ -7,9 +7,12 @@ import Observation
 ///
 /// Power & Reliability Architecture:
 /// - **Sleeping state (~90% of the day)**:
-///   - Keeps `CLLocationManager` alive in `kCLLocationAccuracyThreeKilometers` + `distanceFilter = 1000m`
-///     (GPS radio OFF; cell/Wi-Fi only, near-zero CPU) with `allowsBackgroundLocationUpdates = true`
-///     and `pausesLocationUpdatesAutomatically = false` so iOS NEVER kills active tracking after 10 seconds.
+///   - Keeps `CLLocationManager` alive in `kCLLocationAccuracyThreeKilometers` + `distanceFilter = kCLDistanceFilterNone`
+///     (GPS radio OFF; cell/Wi-Fi only, nanosecond early-exit in delegate -> near-zero CPU/battery) with
+///     `allowsBackgroundLocationUpdates = true` and `pausesLocationUpdatesAutomatically = false` so iOS NEVER
+///     suspends the process between trips.
+///   - Holds a single foreground-created `CLBackgroundActivitySession` across the tracking session (never
+///     invalidated on sleep, since Apple only honors `CLBackgroundActivitySession` created in the foreground).
 ///   - Arms 4 ultra-low-power hardware wake triggers:
 ///     1. CoreMotion M-coprocessor (`CMMotionActivityManager`) — instant wake (<5s) on walking/biking/scooter/car.
 ///     2. Tight 50m exit `CLCircularRegion` geofence.
@@ -17,11 +20,10 @@ import Observation
 ///     4. Significant Location Changes (OS relaunch failsafe if terminated).
 /// - **Moving state (active travel only)**:
 ///   - Immediately ramps `desiredAccuracy` to `kCLLocationAccuracyBest` (or `NearestTenMeters` in Power Saver)
-///     with `distanceFilter = 10m` (smooth Arc-grade route curves) and holds `CLBackgroundActivitySession`
-///     so cold background wakeups are NEVER suspended after 10 seconds.
+///     with `distanceFilter = 10m` (smooth Arc-grade route curves).
 ///   - Zero background processing: raw points append directly to SQLite WAL.
-///   - A lightweight watchdog timer (active ONLY while moving) detects 2 minutes of stillness within 35m
-///     and immediately drops back to 3km sleep mode, shutting down the GPS radio and invalidating the timer.
+///   - Watchdog timer (active ONLY while moving) detects 2 minutes of genuine stillness within 35m and
+///     immediately drops back to 3km sleep mode (shutting down the GPS radio and stopping the timer).
 @MainActor
 @Observable
 final class LocationTracker: NSObject {
@@ -105,9 +107,9 @@ final class LocationTracker: NSObject {
     private let manager: CLLocationManager
     private let motionManager = CMMotionActivityManager()
 
-    /// Held during active movement (and cold background wakes) to prevent iOS 17+ 10-second suspension.
+    /// Created in foreground and retained for the entire enabled session so iOS 17–26 never drops background access after sleep.
     private var backgroundSession: CLBackgroundActivitySession?
-    /// Runs ONLY while `.moving` to ensure we drop back to sleep even when `distanceFilter` stops firing indoors.
+    /// Runs ONLY while `.moving` to return to 3km sleep even when indoors (`distanceFilter` stops firing).
     private var stationaryWatchdog: Timer?
     private var foregroundFixResetTask: Task<Void, Never>?
 
@@ -130,6 +132,8 @@ final class LocationTracker: NSObject {
     /// O(1) stationary dwell tracking while moving.
     private var stationaryAnchor: CLLocation?
     private var lastAnchorResetDate: Date = Date()
+    private var enteredMovingDate: Date = Date()
+    private var stationaryFixCount: Int = 0
     private var lastKnownLocation: CLLocation?
     private var lastMotionMovingDate: Date?
     private var isForegroundOneShotActive: Bool = false
@@ -177,26 +181,26 @@ final class LocationTracker: NSObject {
             return
         }
 
+        ensureBackgroundSession()
         armFailsafeMonitors()
         startMotionWakeMonitorIfAuthorized()
 
         if launchedForLocation {
-            // Woken from terminated state by iOS location event: start moving immediately with a background session
-            // so we capture the trip cleanly; the 2-minute watchdog will drop us back to sleep if stationary.
             enterMovingState(initialLocation: lastKnownLocation)
         } else if state == .stopped {
             enterSleepingState(around: lastKnownLocation)
         }
     }
 
-    /// Called when the user actively brings the app to the foreground.
-    /// Takes one quick fresh fix if stale so opening the app in a new place always updates immediately.
+    /// Called whenever the user brings the app to the foreground.
+    /// Ensures a valid foreground-originated `CLBackgroundActivitySession` and refreshes location if stale.
     func handleAppBecameActive() {
         authorizationStatus = manager.authorizationStatus
         motionAuthorizationStatus = CMMotionActivityManager.authorizationStatus()
         guard isEnabled else { return }
         guard authorizationStatus == .authorizedAlways || authorizationStatus == .authorizedWhenInUse else { return }
 
+        ensureBackgroundSession()
         armFailsafeMonitors()
         startMotionWakeMonitorIfAuthorized()
 
@@ -247,7 +251,6 @@ final class LocationTracker: NSObject {
             }
             return
         }
-        // Trigger the iOS Motion & Fitness permission prompt via a lightweight historical query.
         let now = Date()
         motionManager.queryActivityStarting(from: now.addingTimeInterval(-60), to: now, to: .main) { [weak self] _, _ in
             guard let self else { return }
@@ -270,6 +273,7 @@ final class LocationTracker: NSObject {
             if authorizationStatus == .authorizedWhenInUse {
                 manager.requestAlwaysAuthorization()
             }
+            ensureBackgroundSession()
             requestMotionPermissionIfNeeded()
             armFailsafeMonitors()
             startMotionWakeMonitorIfAuthorized()
@@ -280,6 +284,12 @@ final class LocationTracker: NSObject {
     }
 
     // MARK: - Power State Machine
+
+    private func ensureBackgroundSession() {
+        if backgroundSession == nil {
+            backgroundSession = CLBackgroundActivitySession()
+        }
+    }
 
     private func armFailsafeMonitors() {
         if authorizationStatus == .authorizedAlways {
@@ -319,12 +329,12 @@ final class LocationTracker: NSObject {
         foregroundFixResetTask?.cancel()
         isForegroundOneShotActive = false
         stationaryAnchor = nil
+        stationaryFixCount = 0
         state = .sleeping
 
-        // Release CLBackgroundActivitySession during sleep (keeps status bar clean; 3km mode keeps Always app alive).
-        backgroundSession?.invalidate()
-        backgroundSession = nil
-
+        // IMPORTANT: Do NOT invalidate `backgroundSession` here!
+        // Switching to kCLLocationAccuracyThreeKilometers turns OFF the GPS hardware while keeping
+        // the foreground-established background session intact for the next departure.
         applySleepGPSConfiguration()
 
         if let location {
@@ -337,21 +347,21 @@ final class LocationTracker: NSObject {
         foregroundFixResetTask?.cancel()
         isForegroundOneShotActive = false
         clearExitGeofence()
+        ensureBackgroundSession()
 
-        // Acquire CLBackgroundActivitySession BEFORE ramping up GPS so iOS 17+ NEVER suspends after 10s.
-        if backgroundSession == nil {
-            backgroundSession = CLBackgroundActivitySession()
-        }
-
+        let now = Date()
+        enteredMovingDate = now
         stationaryAnchor = initialLocation
-        lastAnchorResetDate = Date()
+        lastAnchorResetDate = now
+        stationaryFixCount = 0
         state = .moving
 
         applyActiveGPSConfiguration()
         startStationaryWatchdog()
     }
 
-    /// GPS hardware OFF, cell/Wi-Fi only, 1km filter -> ~0 CPU wakeups while keeping the background session intact.
+    /// GPS hardware OFF (cell/Wi-Fi only). `kCLDistanceFilterNone` keeps CoreLocation's background keep-alive
+    /// active so iOS never suspends the app between trips, while `didUpdateLocations` early-exits in nanoseconds.
     private func applySleepGPSConfiguration() {
         if authorizationStatus == .authorizedAlways {
             manager.allowsBackgroundLocationUpdates = true
@@ -359,7 +369,7 @@ final class LocationTracker: NSObject {
         manager.pausesLocationUpdatesAutomatically = false
         manager.activityType = .other
         manager.desiredAccuracy = kCLLocationAccuracyThreeKilometers
-        manager.distanceFilter = 1000
+        manager.distanceFilter = kCLDistanceFilterNone
         manager.startUpdatingLocation()
     }
 
@@ -418,20 +428,18 @@ final class LocationTracker: NSObject {
             stopStationaryWatchdog()
             return
         }
-        let idleSeconds = Date().timeIntervalSince(lastAnchorResetDate)
+        let now = Date()
+        // Never prematurely sleep right after entering moving state.
+        guard now.timeIntervalSince(enteredMovingDate) >= 90 else { return }
 
-        // If CoreMotion says we're actively moving (walking/scooter/car), allow up to 3.5 min before forcing sleep
-        // (handles e.g. long red lights or subway tunnels).
-        let motionRecentlyActive = lastMotionMovingDate.map { Date().timeIntervalSince($0) < 45 } ?? false
+        let idleSeconds = now.timeIntervalSince(lastAnchorResetDate)
+        let motionRecentlyActive = lastMotionMovingDate.map { now.timeIntervalSince($0) < 45 } ?? false
         let threshold = (isMotionCurrentlyMoving || motionRecentlyActive)
             ? max(powerProfile.stationaryTimeout, 210)
             : powerProfile.stationaryTimeout
 
         if idleSeconds >= threshold {
-            // Anchor a final clean stationary point before shutting down GPS.
-            if let loc = lastKnownLocation {
-                recordSample(loc, source: .singleFix, allowStale: true)
-            }
+            // Drop cleanly back to 3km sleep WITHOUT writing a duplicate stale point.
             enterSleepingState(around: stationaryAnchor ?? lastKnownLocation)
         }
     }
@@ -449,6 +457,7 @@ final class LocationTracker: NSObject {
         backgroundSession?.invalidate()
         backgroundSession = nil
         stationaryAnchor = nil
+        stationaryFixCount = 0
         state = .stopped
     }
 
@@ -483,12 +492,20 @@ final class LocationTracker: NSObject {
 
     private func evaluateStationaryAnchor(with location: CLLocation) {
         guard state == .moving else { return }
-        // Ignore coarse fixes when resetting the stationary anchor.
         guard location.horizontalAccuracy > 0, location.horizontalAccuracy <= 50 else { return }
+
+        // If GPS reports active walking/riding speed, we are definitely moving — reset anchor!
+        if location.speed >= 0.8 {
+            stationaryAnchor = location
+            lastAnchorResetDate = Date()
+            stationaryFixCount = 0
+            return
+        }
 
         guard let anchor = stationaryAnchor else {
             stationaryAnchor = location
             lastAnchorResetDate = Date()
+            stationaryFixCount = 1
             return
         }
 
@@ -496,11 +513,13 @@ final class LocationTracker: NSObject {
         if moved > powerProfile.stationaryRadius {
             stationaryAnchor = location
             lastAnchorResetDate = Date()
+            stationaryFixCount = 1
             return
         }
 
-        let dwell = Date().timeIntervalSince(lastAnchorResetDate)
-        if dwell >= powerProfile.stationaryTimeout && !isMotionCurrentlyMoving {
+        stationaryFixCount += 1
+        let dwell = location.timestamp.timeIntervalSince(anchor.timestamp)
+        if dwell >= powerProfile.stationaryTimeout && stationaryFixCount >= 2 && !isMotionCurrentlyMoving {
             enterSleepingState(around: location)
         }
     }
@@ -514,6 +533,7 @@ extension LocationTracker: CLLocationManagerDelegate {
         Task { @MainActor in
             self.authorizationStatus = status
             if self.isEnabled && (status == .authorizedAlways || status == .authorizedWhenInUse) {
+                self.ensureBackgroundSession()
                 self.armFailsafeMonitors()
                 self.startMotionWakeMonitorIfAuthorized()
                 if self.state == .stopped {
@@ -527,7 +547,6 @@ extension LocationTracker: CLLocationManagerDelegate {
         guard !locations.isEmpty else { return }
         Task { @MainActor in
             guard self.isEnabled else { return }
-            let previousAnchor = self.lastKnownLocation
 
             switch self.state {
             case .moving:
@@ -541,14 +560,14 @@ extension LocationTracker: CLLocationManagerDelegate {
             case .sleeping:
                 guard let newest = locations.last else { return }
 
-                // If this was a foreground one-shot check, record it and revert to sleep if still stationary.
+                // Foreground one-shot check
                 if self.isForegroundOneShotActive {
                     if newest.horizontalAccuracy >= 0 && newest.horizontalAccuracy <= 65 {
+                        let prev = self.lastKnownLocation
                         self.isForegroundOneShotActive = false
                         self.foregroundFixResetTask?.cancel()
                         self.recordSample(newest, source: .singleFix)
-                        if let prev = previousAnchor,
-                           newest.distance(from: prev) > self.powerProfile.geofenceRadius {
+                        if let prev, newest.distance(from: prev) > self.powerProfile.geofenceRadius {
                             self.enterMovingState(initialLocation: newest)
                         } else {
                             self.applySleepGPSConfiguration()
@@ -558,9 +577,9 @@ extension LocationTracker: CLLocationManagerDelegate {
                     return
                 }
 
-                // In 3km sleep mode, ignore noisy/coarse keep-alive ticks unless genuine displacement occurred.
+                // Fast O(1) sleep keep-alive check: ignore coarse/stationary ticks with ZERO DB writes.
                 guard newest.horizontalAccuracy >= 0, newest.horizontalAccuracy <= 85 else { return }
-                if let prev = previousAnchor {
+                if let prev = self.lastKnownLocation {
                     let displacement = newest.distance(from: prev)
                     if displacement > max(self.powerProfile.geofenceRadius, newest.horizontalAccuracy + 25) {
                         self.recordSample(newest, source: .significantChange)
@@ -622,7 +641,6 @@ extension LocationTracker: CLLocationManagerDelegate {
                     self.enterMovingState(initialLocation: visitLoc)
                 }
             } else if arrival != nil && !self.isMotionCurrentlyMoving {
-                // Only drop to sleep on visit arrival if CoreMotion isn't actively moving.
                 self.enterSleepingState(around: visitLoc)
             }
         }

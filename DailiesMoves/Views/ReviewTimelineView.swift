@@ -7,6 +7,7 @@ struct ReviewTimelineView: View {
 
     @State private var selectedSegmentID: String?
     @State private var editingSegment: TimelineSegment?
+    @State private var splittingSegment: TimelineSegment?
     @State private var placePickingSegment: TimelineSegment?
     @State private var showFileExporter: Bool = false
     @State private var exportDocument: GPXFileDocument?
@@ -140,6 +141,14 @@ struct ReviewTimelineView: View {
                                     }
                                     .tint(.indigo)
                                 }
+                                if segment.duration >= 60 {
+                                    Button {
+                                        splittingSegment = segment
+                                    } label: {
+                                        Label("Split", systemImage: "scissors")
+                                    }
+                                    .tint(.orange)
+                                }
                             }
                     }
                 }
@@ -220,6 +229,9 @@ struct ReviewTimelineView: View {
             if let idx = viewModel.segments.firstIndex(where: { $0.id == seg.id }) {
                 SegmentEditorSheet(viewModel: viewModel, segment: seg, segmentIndex: idx)
             }
+        }
+        .sheet(item: $splittingSegment) { seg in
+            SplitSegmentSheet(viewModel: viewModel, segment: seg)
         }
         .sheet(item: $placePickingSegment) { seg in
             PlacePickerSheet(
@@ -351,13 +363,23 @@ struct ReviewTimelineView: View {
 
             Spacer()
 
-            // Quick Place Picker or Edit button
+            // Quick Place Picker, Split on Map, or Edit button
             if segment.kind == .stationary && segment.placeName == nil {
                 Button("Name") {
                     placePickingSegment = segment
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.mini)
+            } else if segment.duration >= 60 {
+                Button {
+                    splittingSegment = segment
+                } label: {
+                    Image(systemName: "scissors")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .padding(6)
+                }
+                .buttonStyle(.plain)
             }
 
             Button {

@@ -10,7 +10,7 @@ struct SegmentEditorSheet: View {
 
     @State private var draft: TimelineSegment
     @State private var snapAdjacent: Bool = true
-    @State private var splitDate: Date
+    @State private var showSplitOnMap: Bool = false
     @State private var showPlacePicker: Bool = false
     @State private var showManageActivities: Bool = false
 
@@ -18,8 +18,6 @@ struct SegmentEditorSheet: View {
         self.viewModel = viewModel
         self.segmentIndex = segmentIndex
         _draft = State(initialValue: segment)
-        let midpoint = segment.startDate.addingTimeInterval(segment.duration / 2)
-        _splitDate = State(initialValue: midpoint)
     }
 
     private var canMergePrevious: Bool { segmentIndex > 0 }
@@ -146,18 +144,11 @@ struct SegmentEditorSheet: View {
                     }
 
                     if canSplit {
-                        DatePicker(
-                            "Split At",
-                            selection: $splitDate,
-                            in: draft.startDate.addingTimeInterval(15)...draft.endDate.addingTimeInterval(-15),
-                            displayedComponents: [.hourAndMinute]
-                        )
                         Button {
                             viewModel.updateSegment(draft, snapAdjacent: snapAdjacent)
-                            viewModel.splitSegment(segmentID: draft.id, at: splitDate)
-                            dismiss()
+                            showSplitOnMap = true
                         } label: {
-                            Label("Split Segment Here", systemImage: "scissors")
+                            Label("Split on Map & Points...", systemImage: "scissors")
                         }
                     }
                 }
@@ -185,6 +176,14 @@ struct SegmentEditorSheet: View {
                     }
                     .fontWeight(.semibold)
                 }
+            }
+            .sheet(isPresented: $showSplitOnMap, onDismiss: {
+                // If the user split the segment, close the editor sheet too so they see both new halves cleanly.
+                if viewModel.segments.first(where: { $0.id == draft.id })?.endDate != draft.endDate {
+                    dismiss()
+                }
+            }) {
+                SplitSegmentSheet(viewModel: viewModel, segment: draft)
             }
             .sheet(isPresented: $showPlacePicker) {
                 PlacePickerSheet(
