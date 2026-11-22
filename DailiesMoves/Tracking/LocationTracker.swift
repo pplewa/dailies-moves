@@ -285,8 +285,14 @@ final class LocationTracker: NSObject {
 
     // MARK: - Power State Machine
 
+    /// Only needed when authorized as `WhenInUse` (not `Always`), because `CLBackgroundActivitySession`
+    /// forces the blue Dynamic Island indicator. With `Always` auth, `allowsBackgroundLocationUpdates = true`
+    /// + `kCLLocationAccuracyThreeKilometers` keeps the app alive silently — just like Arc Timeline.
     private func ensureBackgroundSession() {
-        if backgroundSession == nil {
+        if authorizationStatus == .authorizedAlways {
+            backgroundSession?.invalidate()
+            backgroundSession = nil
+        } else if backgroundSession == nil {
             backgroundSession = CLBackgroundActivitySession()
         }
     }

@@ -5,15 +5,27 @@ import SwiftUI
 struct ReviewTimelineView: View {
     @Bindable var viewModel: DayTimelineViewModel
 
+    private enum ActiveSheet: Identifiable {
+        case edit(TimelineSegment)
+        case split(TimelineSegment)
+        case place(TimelineSegment)
+        case share(URL)
+
+        var id: String {
+            switch self {
+            case .edit(let seg): return "edit-\(seg.id)"
+            case .split(let seg): return "split-\(seg.id)"
+            case .place(let seg): return "place-\(seg.id)"
+            case .share(let url): return "share-\(url.lastPathComponent)"
+            }
+        }
+    }
+
     @State private var selectedSegmentID: String?
-    @State private var editingSegment: TimelineSegment?
-    @State private var splittingSegment: TimelineSegment?
-    @State private var placePickingSegment: TimelineSegment?
+    @State private var activeSheet: ActiveSheet?
     @State private var showFileExporter: Bool = false
     @State private var exportDocument: GPXFileDocument?
     @State private var exportFilename: String = ""
-    @State private var shareFileURL: URL?
-    @State private var showShareSheet: Bool = false
     @State private var showRedetectConfirm: Bool = false
 
     var body: some View {
@@ -143,7 +155,7 @@ struct ReviewTimelineView: View {
                                 }
                                 if segment.duration >= 60 {
                                     Button {
-                                        splittingSegment = segment
+                                        activeSheet = .split(segment)
                                     } label: {
                                         Label("Split", systemImage: "scissors")
                                     }
@@ -183,15 +195,20 @@ struct ReviewTimelineView: View {
                         let pkg = viewModel.buildGPXExportPackage()
                         exportDocument = GPXFileDocument(data: pkg.data)
                         exportFilename = pkg.filename
-                        showFileExporter = true
+                        Task { @MainActor in
+                            try? await Task.sleep(for: .milliseconds(150))
+                            showFileExporter = true
+                        }
                     } label: {
                         Label("Save to Files / iCloud Drive...", systemImage: "icloud.and.arrow.up")
                     }
 
                     Button {
                         if let url = viewModel.writeTemporaryShareFile() {
-                            shareFileURL = url
-                            showShareSheet = true
+                            Task { @MainActor in
+                                try? await Task.sleep(for: .milliseconds(150))
+                                activeSheet = .share(url)
+                            }
                         }
                     } label: {
                         Label("Share GPX...", systemImage: "square.and.arrow.up")
@@ -225,50 +242,51 @@ struct ReviewTimelineView: View {
         .task {
             await viewModel.enterReviewMode()
         }
-        .sheet(item: $editingSegment) { seg in
-            if let idx = viewModel.segments.firstIndex(where: { $0.id == seg.id }) {
-                SegmentEditorSheet(viewModel: viewModel, segment: seg, segmentIndex: idx)
+        .sheet(item: $activeSheet) { sheet in
+            switch sheet {
+            case .edit(let seg):
+                if let idx = viewModel.segments.firstIndex(where: { $0.id == seg.id }) {
+                    SegmentEditorSheet(viewModel: viewModel, segment: seg, segmentIndex: idx)
+                }
+            case .split(let seg):
+                SplitSegmentSheet(viewModel: viewModel, segment: seg)
+            case .place(let seg):
+                PlacePickerSheet(
+                    coordinate: seg.coordinate,
+                    currentName: seg.placeName,
+                    savedPlaces: viewModel.savedPlaces
+                ) { name, googleID, address, coord, existingPlaceID in
+                    viewModel.assignPlace(
+                        toSegmentID: seg.id,
+                        name: name,
+                        googlePlaceID: googleID,
+                        address: address,
+                        coordinate: coord,
+                        existingPlaceID: existingPlaceID
+                    )
+                }
+            case .share(let url):
+                ActivityShareSheet(items: [url])
             }
         }
-        .sheet(item: $splittingSegment) { seg in
-            SplitSegmentSheet(viewModel: viewModel, segment: seg)
-        }
-        .sheet(item: $placePickingSegment) { seg in
-            PlacePickerSheet(
-                coordinate: seg.coordinate,
-                currentName: seg.placeName,
-                savedPlaces: viewModel.savedPlaces
-            ) { name, googleID, address, coord, existingPlaceID in
-                viewModel.assignPlace(
-                    toSegmentID: seg.id,
-                    name: name,
-                    googlePlaceID: googleID,
-                    address: address,
-                    coordinate: coord,
-                    existingPlaceID: existingPlaceID
-                )
-            }
-        }
-        .fileExporter(
-            isPresented: $showFileExporter,
-            document: exportDocument,
-            contentType: .gpx,
-            defaultFilename: exportFilename
-        ) { result in
-            switch result {
-            case .success:
-                let pkg = viewModel.buildGPXExportPackage()
-                viewModel.markExported(package: pkg)
-                viewModel.statusBanner = "Exported \(pkg.filename)"
-            case .failure(let error):
-                viewModel.errorMessage = error.localizedDescription
-            }
-        }
-        .sheet(isPresented: $showShareSheet) {
-            if let shareFileURL {
-                ActivityShareSheet(items: [shareFileURL])
-            }
-        }
+        .background(
+            Color.clear
+                .fileExporter(
+                    isPresented: $showFileExporter,
+                    document: exportDocument,
+                    contentType: .gpx,
+                    defaultFilename: exportFilename
+                ) { result in
+                    switch result {
+                    case .success:
+                        let pkg = viewModel.buildGPXExportPackage()
+                        viewModel.markExported(package: pkg)
+                        viewModel.statusBanner = "Exported \(pkg.filename)"
+                    case .failure(let error):
+                        viewModel.errorMessage = error.localizedDescription
+                    }
+                }
+        )
         .alert(
             "Re-detect timeline from raw samples?",
             isPresented: $showRedetectConfirm
@@ -288,7 +306,7 @@ struct ReviewTimelineView: View {
             // Left Icon Badge
             if segment.kind == .stationary {
                 Button {
-                    placePickingSegment = segment
+                    activeSheet = .place(segment)
                 } label: {
                     Image(systemName: "mappin.circle.fill")
                         .font(.title2)
@@ -366,13 +384,13 @@ struct ReviewTimelineView: View {
             // Quick Place Picker, Split on Map, or Edit button
             if segment.kind == .stationary && segment.placeName == nil {
                 Button("Name") {
-                    placePickingSegment = segment
+                    activeSheet = .place(segment)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.mini)
             } else if segment.duration >= 60 {
                 Button {
-                    splittingSegment = segment
+                    activeSheet = .split(segment)
                 } label: {
                     Image(systemName: "scissors")
                         .font(.subheadline)
@@ -383,7 +401,7 @@ struct ReviewTimelineView: View {
             }
 
             Button {
-                editingSegment = segment
+                activeSheet = .edit(segment)
             } label: {
                 Image(systemName: "slider.horizontal.3")
                     .font(.subheadline)
