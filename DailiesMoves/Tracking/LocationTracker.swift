@@ -292,7 +292,8 @@ final class LocationTracker: NSObject {
         if authorizationStatus == .authorizedAlways {
             backgroundSession?.invalidate()
             backgroundSession = nil
-        } else if backgroundSession == nil {
+            manager.showsBackgroundLocationIndicator = false
+        } else if authorizationStatus == .authorizedWhenInUse, backgroundSession == nil {
             backgroundSession = CLBackgroundActivitySession()
         }
     }

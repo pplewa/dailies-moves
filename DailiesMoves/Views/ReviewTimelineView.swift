@@ -9,6 +9,7 @@ struct ReviewTimelineView: View {
         case edit(TimelineSegment)
         case split(TimelineSegment)
         case place(TimelineSegment)
+        case exportFile(URL)
         case share(URL)
 
         var id: String {
@@ -16,6 +17,7 @@ struct ReviewTimelineView: View {
             case .edit(let seg): return "edit-\(seg.id)"
             case .split(let seg): return "split-\(seg.id)"
             case .place(let seg): return "place-\(seg.id)"
+            case .exportFile(let url): return "export-\(url.lastPathComponent)"
             case .share(let url): return "share-\(url.lastPathComponent)"
             }
         }
@@ -23,9 +25,6 @@ struct ReviewTimelineView: View {
 
     @State private var selectedSegmentID: String?
     @State private var activeSheet: ActiveSheet?
-    @State private var showFileExporter: Bool = false
-    @State private var exportDocument: GPXFileDocument?
-    @State private var exportFilename: String = ""
     @State private var showRedetectConfirm: Bool = false
 
     var body: some View {
@@ -189,15 +188,11 @@ struct ReviewTimelineView: View {
                     }
 
                     Button {
-                        if viewModel.hasUnsavedChanges {
-                            viewModel.saveReviewedDay()
-                        }
-                        let pkg = viewModel.buildGPXExportPackage()
-                        exportDocument = GPXFileDocument(data: pkg.data)
-                        exportFilename = pkg.filename
-                        Task { @MainActor in
-                            try? await Task.sleep(for: .milliseconds(150))
-                            showFileExporter = true
+                        if let url = viewModel.writeTemporaryShareFile() {
+                            Task { @MainActor in
+                                try? await Task.sleep(for: .milliseconds(150))
+                                activeSheet = .exportFile(url)
+                            }
                         }
                     } label: {
                         Label("Save to Files / iCloud Drive...", systemImage: "icloud.and.arrow.up")
@@ -265,28 +260,26 @@ struct ReviewTimelineView: View {
                         existingPlaceID: existingPlaceID
                     )
                 }
+            case .exportFile(let url):
+                DocumentExportSheet(
+                    fileURL: url,
+                    onComplete: { result in
+                        activeSheet = nil
+                        switch result {
+                        case .success(let savedURL):
+                            viewModel.statusBanner = "Exported \(savedURL.lastPathComponent)"
+                        case .failure(let error):
+                            viewModel.errorMessage = error.localizedDescription
+                        }
+                    },
+                    onCancel: {
+                        activeSheet = nil
+                    }
+                )
             case .share(let url):
                 ActivityShareSheet(items: [url])
             }
         }
-        .background(
-            Color.clear
-                .fileExporter(
-                    isPresented: $showFileExporter,
-                    document: exportDocument,
-                    contentType: .gpx,
-                    defaultFilename: exportFilename
-                ) { result in
-                    switch result {
-                    case .success:
-                        let pkg = viewModel.buildGPXExportPackage()
-                        viewModel.markExported(package: pkg)
-                        viewModel.statusBanner = "Exported \(pkg.filename)"
-                    case .failure(let error):
-                        viewModel.errorMessage = error.localizedDescription
-                    }
-                }
-        )
         .alert(
             "Re-detect timeline from raw samples?",
             isPresented: $showRedetectConfirm
@@ -415,15 +408,4 @@ struct ReviewTimelineView: View {
             selectedSegmentID = (selectedSegmentID == segment.id) ? nil : segment.id
         }
     }
-}
-
-/// UIKit share sheet wrapper for clean `.gpx` file sharing.
-struct ActivityShareSheet: UIViewControllerRepresentable {
-    let items: [Any]
-
-    func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(activityItems: items, applicationActivities: nil)
-    }
-
-    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }

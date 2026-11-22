@@ -5,17 +5,26 @@ import CoreMotion
 /// Minimal main screen: passive tracking status + day selector + manual Review & Export triggers.
 /// Does ZERO background or foreground processing until the user explicitly opens Review.
 struct RootView: View {
+    private enum ActiveSheet: Identifiable {
+        case history
+        case settings
+        case exportFile(URL)
+        case share(URL)
+
+        var id: String {
+            switch self {
+            case .history: return "history"
+            case .settings: return "settings"
+            case .exportFile(let url): return "export-\(url.lastPathComponent)"
+            case .share(let url): return "share-\(url.lastPathComponent)"
+            }
+        }
+    }
+
     @State private var tracker = LocationTracker.shared
     @State private var dayVM = DayTimelineViewModel()
     @State private var settingsVM = SettingsViewModel()
-
-    @State private var showHistory: Bool = false
-    @State private var showSettings: Bool = false
-    @State private var showFileExporter: Bool = false
-    @State private var exportDocument: GPXFileDocument?
-    @State private var exportFilename: String = ""
-    @State private var shareFileURL: URL?
-    @State private var showShareSheet: Bool = false
+    @State private var activeSheet: ActiveSheet?
 
     var body: some View {
         NavigationStack {
@@ -71,7 +80,7 @@ struct RootView: View {
                         Spacer()
 
                         Button {
-                            showHistory = true
+                            activeSheet = .history
                         } label: {
                             VStack(spacing: 2) {
                                 Text(dayVM.displayDateTitle)
@@ -202,18 +211,16 @@ struct RootView: View {
                         }
 
                         Button {
-                            let pkg = dayVM.buildGPXExportPackage()
-                            exportDocument = GPXFileDocument(data: pkg.data)
-                            exportFilename = pkg.filename
-                            showFileExporter = true
+                            if let url = dayVM.writeTemporaryShareFile() {
+                                activeSheet = .exportFile(url)
+                            }
                         } label: {
                             Label("Export \(dayVM.previewExportFilename) to Files / iCloud Drive", systemImage: "icloud.and.arrow.up")
                         }
 
                         Button {
                             if let url = dayVM.writeTemporaryShareFile() {
-                                shareFileURL = url
-                                showShareSheet = true
+                                activeSheet = .share(url)
                             }
                         } label: {
                             Label("Share GPX...", systemImage: "square.and.arrow.up")
@@ -238,7 +245,7 @@ struct RootView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
-                        showHistory = true
+                        activeSheet = .history
                     } label: {
                         Image(systemName: "calendar")
                     }
@@ -246,7 +253,7 @@ struct RootView: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         settingsVM.reload()
-                        showSettings = true
+                        activeSheet = .settings
                     } label: {
                         Image(systemName: "gearshape")
                     }
@@ -255,37 +262,37 @@ struct RootView: View {
             .onAppear {
                 dayVM.loadSelectedDayLight()
             }
-            .sheet(isPresented: $showHistory) {
-                DayHistorySheet(viewModel: dayVM) { chosenKey in
-                    dayVM.selectDay(chosenKey)
-                }
-            }
-            .sheet(isPresented: $showSettings) {
-                SettingsView(
-                    tracker: tracker,
-                    settingsVM: settingsVM
-                ) {
-                    dayVM.reloadReferenceData()
-                }
-            }
-            .fileExporter(
-                isPresented: $showFileExporter,
-                document: exportDocument,
-                contentType: .gpx,
-                defaultFilename: exportFilename
-            ) { result in
-                switch result {
-                case .success:
-                    let pkg = dayVM.buildGPXExportPackage()
-                    dayVM.markExported(package: pkg)
-                    dayVM.statusBanner = "Exported \(pkg.filename)"
-                case .failure(let error):
-                    dayVM.errorMessage = error.localizedDescription
-                }
-            }
-            .sheet(isPresented: $showShareSheet) {
-                if let shareFileURL {
-                    ActivityShareSheet(items: [shareFileURL])
+            .sheet(item: $activeSheet) { sheet in
+                switch sheet {
+                case .history:
+                    DayHistorySheet(viewModel: dayVM) { chosenKey in
+                        dayVM.selectDay(chosenKey)
+                    }
+                case .settings:
+                    SettingsView(
+                        tracker: tracker,
+                        settingsVM: settingsVM
+                    ) {
+                        dayVM.reloadReferenceData()
+                    }
+                case .exportFile(let url):
+                    DocumentExportSheet(
+                        fileURL: url,
+                        onComplete: { result in
+                            activeSheet = nil
+                            switch result {
+                            case .success(let savedURL):
+                                dayVM.statusBanner = "Exported \(savedURL.lastPathComponent)"
+                            case .failure(let error):
+                                dayVM.errorMessage = error.localizedDescription
+                            }
+                        },
+                        onCancel: {
+                            activeSheet = nil
+                        }
+                    )
+                case .share(let url):
+                    ActivityShareSheet(items: [url])
                 }
             }
         }
