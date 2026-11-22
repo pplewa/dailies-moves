@@ -8,15 +8,11 @@ struct RootView: View {
     private enum ActiveSheet: Identifiable {
         case history
         case settings
-        case exportFile(URL)
-        case share(URL)
 
         var id: String {
             switch self {
             case .history: return "history"
             case .settings: return "settings"
-            case .exportFile(let url): return "export-\(url.lastPathComponent)"
-            case .share(let url): return "share-\(url.lastPathComponent)"
             }
         }
     }
@@ -212,7 +208,14 @@ struct RootView: View {
 
                         Button {
                             if let url = dayVM.writeTemporaryShareFile() {
-                                activeSheet = .exportFile(url)
+                                NativeExportPresenter.shared.presentExport(fileURL: url) { result in
+                                    switch result {
+                                    case .success(let savedURL):
+                                        dayVM.statusBanner = "Exported \(savedURL.lastPathComponent)"
+                                    case .failure(let error):
+                                        dayVM.errorMessage = error.localizedDescription
+                                    }
+                                }
                             }
                         } label: {
                             Label("Export \(dayVM.previewExportFilename) to Files / iCloud Drive", systemImage: "icloud.and.arrow.up")
@@ -220,7 +223,7 @@ struct RootView: View {
 
                         Button {
                             if let url = dayVM.writeTemporaryShareFile() {
-                                activeSheet = .share(url)
+                                NativeExportPresenter.shared.presentShare(fileURL: url)
                             }
                         } label: {
                             Label("Share GPX...", systemImage: "square.and.arrow.up")
@@ -275,24 +278,6 @@ struct RootView: View {
                     ) {
                         dayVM.reloadReferenceData()
                     }
-                case .exportFile(let url):
-                    DocumentExportSheet(
-                        fileURL: url,
-                        onComplete: { result in
-                            activeSheet = nil
-                            switch result {
-                            case .success(let savedURL):
-                                dayVM.statusBanner = "Exported \(savedURL.lastPathComponent)"
-                            case .failure(let error):
-                                dayVM.errorMessage = error.localizedDescription
-                            }
-                        },
-                        onCancel: {
-                            activeSheet = nil
-                        }
-                    )
-                case .share(let url):
-                    ActivityShareSheet(items: [url])
                 }
             }
         }

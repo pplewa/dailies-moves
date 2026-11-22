@@ -9,16 +9,12 @@ struct ReviewTimelineView: View {
         case edit(TimelineSegment)
         case split(TimelineSegment)
         case place(TimelineSegment)
-        case exportFile(URL)
-        case share(URL)
 
         var id: String {
             switch self {
             case .edit(let seg): return "edit-\(seg.id)"
             case .split(let seg): return "split-\(seg.id)"
             case .place(let seg): return "place-\(seg.id)"
-            case .exportFile(let url): return "export-\(url.lastPathComponent)"
-            case .share(let url): return "share-\(url.lastPathComponent)"
             }
         }
     }
@@ -191,7 +187,14 @@ struct ReviewTimelineView: View {
                         if let url = viewModel.writeTemporaryShareFile() {
                             Task { @MainActor in
                                 try? await Task.sleep(for: .milliseconds(150))
-                                activeSheet = .exportFile(url)
+                                NativeExportPresenter.shared.presentExport(fileURL: url) { result in
+                                    switch result {
+                                    case .success(let savedURL):
+                                        viewModel.statusBanner = "Exported \(savedURL.lastPathComponent)"
+                                    case .failure(let error):
+                                        viewModel.errorMessage = error.localizedDescription
+                                    }
+                                }
                             }
                         }
                     } label: {
@@ -202,7 +205,7 @@ struct ReviewTimelineView: View {
                         if let url = viewModel.writeTemporaryShareFile() {
                             Task { @MainActor in
                                 try? await Task.sleep(for: .milliseconds(150))
-                                activeSheet = .share(url)
+                                NativeExportPresenter.shared.presentShare(fileURL: url)
                             }
                         }
                     } label: {
@@ -260,24 +263,6 @@ struct ReviewTimelineView: View {
                         existingPlaceID: existingPlaceID
                     )
                 }
-            case .exportFile(let url):
-                DocumentExportSheet(
-                    fileURL: url,
-                    onComplete: { result in
-                        activeSheet = nil
-                        switch result {
-                        case .success(let savedURL):
-                            viewModel.statusBanner = "Exported \(savedURL.lastPathComponent)"
-                        case .failure(let error):
-                            viewModel.errorMessage = error.localizedDescription
-                        }
-                    },
-                    onCancel: {
-                        activeSheet = nil
-                    }
-                )
-            case .share(let url):
-                ActivityShareSheet(items: [url])
             }
         }
         .alert(
