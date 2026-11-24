@@ -41,7 +41,13 @@ struct SplitSegmentSheet: View {
         self.pointSpeeds = speeds
 
         // Start cursor at the midpoint (or largest speed drop if detectable)
-        let defaultIdx = pts.count >= 3 ? Self.suggestedSplitIndex(points: pts, speeds: speeds) : 0
+        let defaultIdx: Int
+        if pts.count >= 4 {
+            let rawIdx = Self.suggestedSplitIndex(points: pts, speeds: speeds)
+            defaultIdx = min(max(rawIdx, 1), pts.count - 2)
+        } else {
+            defaultIdx = 0
+        }
         _selectedIndex = State(initialValue: defaultIdx)
         _fallbackSplitDate = State(initialValue: segment.startDate.addingTimeInterval(segment.duration / 2))
 
@@ -56,8 +62,15 @@ struct SplitSegmentSheet: View {
         ))
     }
 
+    /// Requires at least 4 points so `1...(count - 2)` always has strictly `min < max` for SwiftUI `Slider`.
     private var hasScrubbablePoints: Bool {
-        trackPoints.count >= 3
+        trackPoints.count >= 4
+    }
+
+    private var safeFallbackDateRange: ClosedRange<Date> {
+        let lo = segment.startDate.addingTimeInterval(1)
+        let hi = max(lo.addingTimeInterval(1), segment.endDate.addingTimeInterval(-1))
+        return lo...hi
     }
 
     private var currentSplitDate: Date {
@@ -159,6 +172,9 @@ struct SplitSegmentSheet: View {
                                         .foregroundStyle(.red)
                                 }
                             }
+                        } else if let coord = segment.coordinate {
+                            Marker(segment.placeName ?? "Place", systemImage: "mappin.circle.fill", coordinate: coord)
+                                .tint(.orange)
                         }
                     }
                     .mapStyle(.standard(elevation: .flat, pointsOfInterest: .excludingAll))
@@ -250,7 +266,7 @@ struct SplitSegmentSheet: View {
                         DatePicker(
                             "Split Time (Local)",
                             selection: $fallbackSplitDate,
-                            in: segment.startDate.addingTimeInterval(15)...segment.endDate.addingTimeInterval(-15),
+                            in: safeFallbackDateRange,
                             displayedComponents: [.hourAndMinute]
                         )
                         Text("Few GPS points in this segment — choose split time directly.")
