@@ -101,6 +101,7 @@ final class LocationTracker: NSObject {
 
     private static let enabledKey = "dailies.tracking.enabled"
     private static let powerProfileKey = "dailies.tracking.powerProfile"
+    private static let keepBackgroundSessionKey = "dailies.tracking.keepBackgroundSession"
     nonisolated private static let geofenceID = "dailies.stationary.exit"
 
     private let database: LocationDatabase
@@ -129,6 +130,18 @@ final class LocationTracker: NSObject {
         }
     }
 
+    /// When true (default), retains a foreground-created `CLBackgroundActivitySession` while tracking is enabled
+    /// to prevent iOS from throttling/suspending background GPS after ~10s on wake.
+    /// Shows the blue location arrow in the Dynamic Island; turning it off hides the arrow when Always auth is granted.
+    var keepBackgroundSessionActive: Bool {
+        didSet {
+            UserDefaults.standard.set(keepBackgroundSessionActive, forKey: Self.keepBackgroundSessionKey)
+            if isEnabled {
+                ensureBackgroundSession()
+            }
+        }
+    }
+
     /// O(1) stationary dwell tracking while moving.
     private var stationaryAnchor: CLLocation?
     private var lastAnchorResetDate: Date = Date()
@@ -147,6 +160,11 @@ final class LocationTracker: NSObject {
         let savedProfile = UserDefaults.standard.string(forKey: Self.powerProfileKey)
             .flatMap(PowerProfile.init(rawValue:)) ?? .balanced
         self.powerProfile = savedProfile
+        if UserDefaults.standard.object(forKey: Self.keepBackgroundSessionKey) != nil {
+            self.keepBackgroundSessionActive = UserDefaults.standard.bool(forKey: Self.keepBackgroundSessionKey)
+        } else {
+            self.keepBackgroundSessionActive = true
+        }
 
         super.init()
 
@@ -285,16 +303,19 @@ final class LocationTracker: NSObject {
 
     // MARK: - Power State Machine
 
-    /// Only needed when authorized as `WhenInUse` (not `Always`), because `CLBackgroundActivitySession`
-    /// forces the blue Dynamic Island indicator. With `Always` auth, `allowsBackgroundLocationUpdates = true`
-    /// + `kCLLocationAccuracyThreeKilometers` keeps the app alive silently — just like Arc Timeline.
+    /// Holds `CLBackgroundActivitySession` when `keepBackgroundSessionActive` is enabled (prevents iOS 17–26
+    /// 10-second background suspension cutoffs, at the cost of the blue Dynamic Island arrow) or as a required
+    /// fallback under `WhenInUse` authorization. Invalidated immediately when turned off under `Always` auth.
     private func ensureBackgroundSession() {
-        if authorizationStatus == .authorizedAlways {
+        let shouldHoldSession = keepBackgroundSessionActive || (authorizationStatus == .authorizedWhenInUse)
+        if shouldHoldSession {
+            if backgroundSession == nil {
+                backgroundSession = CLBackgroundActivitySession()
+            }
+        } else {
             backgroundSession?.invalidate()
             backgroundSession = nil
             manager.showsBackgroundLocationIndicator = false
-        } else if authorizationStatus == .authorizedWhenInUse, backgroundSession == nil {
-            backgroundSession = CLBackgroundActivitySession()
         }
     }
 

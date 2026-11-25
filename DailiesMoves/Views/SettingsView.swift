@@ -32,10 +32,19 @@ struct SettingsView: View {
                     }
                     .pickerStyle(.inline)
                     .labelsHidden()
+
+                    Toggle(isOn: $tracker.keepBackgroundSessionActive) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Reliable Background Session")
+                            Text("Prevents iOS 10s wake cutoffs (shows blue Dynamic Island arrow)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 } header: {
                     Text("Battery & Tracking")
                 } footer: {
-                    Text("GPS stays completely off while stationary (relying on hardware geofence & Visits). No processing runs until you manually open Review.")
+                    Text("GPS stays off while stationary regardless of this toggle. Turning Reliable Background Session off hides the Dynamic Island arrow under Always location, but iOS may suspend background wakes after ~10 seconds.")
                 }
 
                 // Export Destination (iCloud Drive / Files folder bookmark)
