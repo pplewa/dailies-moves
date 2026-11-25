@@ -62,4 +62,72 @@ final class GPXExporterTests: XCTestCase {
         XCTAssertTrue(pkg.xmlString.contains("<dm:endTime>2026-11-19T17:40:00Z</dm:endTime>"))
         XCTAssertTrue(pkg.xmlString.contains("<trkpt lat=\"13.758000\" lon=\"100.503000\">"))
     }
+
+    func testImportGPXOverridesMismatchedDatesToTargetDay() throws {
+        let bangkok = TimeZone(secondsFromGMT: 7 * 3600)!
+        // GPX generated for local 2026-11-20 (Escent 00:00-14:00, Walking 14:00-14:05, Central 14:05-14:20)
+        let xml = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <gpx version="1.1" creator="DailiesMoves" xmlns="http://www.topografix.com/GPX/1/1" xmlns:dm="https://dailiesmoves.app/gpx/1">
+          <metadata><name>2026-11-20</name></metadata>
+          <wpt lat="18.805682" lon="99.020049">
+            <time>2026-11-19T17:00:00Z</time>
+            <name>Escent Condo</name>
+            <extensions>
+              <dm:startTime>2026-11-19T17:00:00Z</dm:startTime>
+              <dm:endTime>2026-11-20T07:00:00Z</dm:endTime>
+            </extensions>
+          </wpt>
+          <trk>
+            <name>Scooter</name>
+            <type>scooter</type>
+            <extensions>
+              <dm:startTime>2026-11-20T07:00:00Z</dm:startTime>
+              <dm:endTime>2026-11-20T07:05:00Z</dm:endTime>
+            </extensions>
+            <trkseg>
+              <trkpt lat="18.805682" lon="99.020049"><time>2026-11-20T07:00:00Z</time></trkpt>
+              <trkpt lat="18.806569" lon="99.017970"><time>2026-11-20T07:05:00Z</time></trkpt>
+            </trkseg>
+          </trk>
+          <wpt lat="18.806569" lon="99.017970">
+            <time>2026-11-20T07:05:00Z</time>
+            <name>Central Festival</name>
+            <extensions>
+              <dm:startTime>2026-11-20T07:05:00Z</dm:startTime>
+              <dm:endTime>2026-11-20T07:20:00Z</dm:endTime>
+            </extensions>
+          </wpt>
+        </gpx>
+        """
+
+        // Import onto a DIFFERENT target day: 2026-11-25!
+        let result = try GPXImporter.parse(
+            data: Data(xml.utf8),
+            targetLocalDayKey: "2026-11-25",
+            existingActivityTypes: ActivityType.defaults,
+            existingSavedPlaces: [],
+            timeZone: bangkok
+        )
+
+        XCTAssertTrue(result.didOverrideDates)
+        XCTAssertEqual(result.sourceDayKey, "2026-11-20")
+        XCTAssertEqual(result.segments.count, 3)
+        XCTAssertEqual(result.newActivityTypes.first?.name, "Scooter")
+
+        // Verify exact local times were preserved on 2026-11-25:
+        // 00:00 +07 on Nov 25 == 2026-11-24T17:00:00Z
+        // 14:00 +07 on Nov 25 == 2026-11-25T07:00:00Z
+        XCTAssertEqual(DateFormatting.iso8601UTC(result.segments[0].startDate), "2026-11-24T17:00:00Z")
+        XCTAssertEqual(DateFormatting.iso8601UTC(result.segments[0].endDate), "2026-11-25T07:00:00Z")
+        XCTAssertEqual(DateFormatting.iso8601UTC(result.segments[1].startDate), "2026-11-25T07:00:00Z")
+        XCTAssertEqual(DateFormatting.iso8601UTC(result.segments[1].endDate), "2026-11-25T07:05:00Z")
+        XCTAssertEqual(DateFormatting.iso8601UTC(result.segments[2].endDate), "2026-11-25T07:20:00Z")
+
+        // Verify trackpoints were also rebased to 2026-11-25!
+        let activeSamples = result.samples.filter { $0.source == .activeGPS }
+        XCTAssertEqual(activeSamples.count, 2)
+        XCTAssertEqual(DateFormatting.iso8601UTC(activeSamples[0].timestamp), "2026-11-25T07:00:00Z")
+        XCTAssertEqual(DateFormatting.iso8601UTC(activeSamples[1].timestamp), "2026-11-25T07:05:00Z")
+    }
 }

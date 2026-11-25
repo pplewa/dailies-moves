@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 /// Presents native UIKit system sheets (`UIDocumentPickerViewController` and `UIActivityViewController`)
 /// directly from the active window's top-most `UIViewController`.
@@ -10,12 +11,21 @@ import UIKit
 final class NativeExportPresenter: NSObject, UIDocumentPickerDelegate {
     static let shared = NativeExportPresenter()
 
-    private var exportCompletion: ((Result<URL, Error>) -> Void)?
+    private var pickerCompletion: ((Result<URL, Error>) -> Void)?
 
     func presentExport(fileURL: URL, onComplete: @escaping (Result<URL, Error>) -> Void) {
         guard let presenter = topViewController() else { return }
-        exportCompletion = onComplete
+        pickerCompletion = onComplete
         let picker = UIDocumentPickerViewController(forExporting: [fileURL], asCopy: true)
+        picker.delegate = self
+        presenter.present(picker, animated: true)
+    }
+
+    func presentImport(onComplete: @escaping (Result<URL, Error>) -> Void) {
+        guard let presenter = topViewController() else { return }
+        pickerCompletion = onComplete
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.gpx, .xml], asCopy: true)
+        picker.allowsMultipleSelection = false
         picker.delegate = self
         presenter.present(picker, animated: true)
     }
@@ -50,8 +60,8 @@ final class NativeExportPresenter: NSObject, UIDocumentPickerDelegate {
     nonisolated func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
         let first = urls.first
         Task { @MainActor in
-            let cb = self.exportCompletion
-            self.exportCompletion = nil
+            let cb = self.pickerCompletion
+            self.pickerCompletion = nil
             if let first {
                 cb?(.success(first))
             }
@@ -60,7 +70,7 @@ final class NativeExportPresenter: NSObject, UIDocumentPickerDelegate {
 
     nonisolated func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
         Task { @MainActor in
-            self.exportCompletion = nil
+            self.pickerCompletion = nil
         }
     }
 }

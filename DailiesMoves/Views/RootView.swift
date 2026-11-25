@@ -192,9 +192,9 @@ struct RootView: View {
                     }
                 }
 
-                // 5. Manual GPX Export Actions
-                if dayVM.rawSampleCount > 0 || !dayVM.segments.isEmpty {
-                    Section {
+                // 5. Manual GPX Export & Import Actions
+                Section {
+                    if dayVM.rawSampleCount > 0 || !dayVM.segments.isEmpty {
                         if ExportFolderBookmark.hasSavedFolder {
                             Button {
                                 _ = dayVM.exportToSavedFolder()
@@ -228,20 +228,35 @@ struct RootView: View {
                         } label: {
                             Label("Share GPX...", systemImage: "square.and.arrow.up")
                         }
-
-                        if let banner = dayVM.statusBanner {
-                            Text(banner)
-                                .font(.caption)
-                                .foregroundStyle(.green)
-                        }
-                        if let error = dayVM.errorMessage {
-                            Text(error)
-                                .font(.caption)
-                                .foregroundStyle(.red)
-                        }
-                    } header: {
-                        Text("Export GPX (UTC)")
                     }
+
+                    Button {
+                        NativeExportPresenter.shared.presentImport { result in
+                            switch result {
+                            case .success(let url):
+                                dayVM.importGPX(from: url)
+                            case .failure(let error):
+                                dayVM.errorMessage = error.localizedDescription
+                            }
+                        }
+                    } label: {
+                        Label("Import GPX (Replace Day)...", systemImage: "square.and.arrow.down")
+                    }
+
+                    if let banner = dayVM.statusBanner {
+                        Text(banner)
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                    }
+                    if let error = dayVM.errorMessage {
+                        Text(error)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                } header: {
+                    Text("GPX Export / Import (UTC)")
+                } footer: {
+                    Text("Importing a GPX replaces this day's timeline and automatically rebases dates to \(dayVM.displayDateTitle) if they don't match.")
                 }
             }
             .navigationTitle("Dailies")

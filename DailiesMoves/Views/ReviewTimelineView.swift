@@ -211,6 +211,24 @@ struct ReviewTimelineView: View {
                     } label: {
                         Label("Share GPX...", systemImage: "square.and.arrow.up")
                     }
+
+                    Divider()
+
+                    Button {
+                        Task { @MainActor in
+                            try? await Task.sleep(for: .milliseconds(150))
+                            NativeExportPresenter.shared.presentImport { result in
+                                switch result {
+                                case .success(let url):
+                                    viewModel.importGPX(from: url)
+                                case .failure(let error):
+                                    viewModel.errorMessage = error.localizedDescription
+                                }
+                            }
+                        }
+                    } label: {
+                        Label("Import GPX (Replace Day)...", systemImage: "square.and.arrow.down")
+                    }
                 } label: {
                     Image(systemName: "square.and.arrow.up")
                 }

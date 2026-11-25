@@ -539,6 +539,67 @@ final class DayTimelineViewModel {
         }
     }
 
+    /// Imports a GPX file onto `selectedDayKey`, rebasing dates if the GPX comes from a different day,
+    /// and replaces the current day's timeline and track samples.
+    func importGPX(from fileURL: URL) {
+        errorMessage = nil
+        statusBanner = nil
+
+        let didAccess = fileURL.startAccessingSecurityScopedResource()
+        defer {
+            if didAccess { fileURL.stopAccessingSecurityScopedResource() }
+        }
+
+        do {
+            let data = try Data(contentsOf: fileURL)
+            reloadReferenceData()
+            let parsed = try GPXImporter.parse(
+                data: data,
+                targetLocalDayKey: selectedDayKey,
+                existingActivityTypes: activityTypes,
+                existingSavedPlaces: savedPlaces
+            )
+
+            for newType in parsed.newActivityTypes {
+                database.upsertActivityType(newType)
+            }
+            for newPlace in parsed.newSavedPlaces {
+                database.upsertSavedPlace(newPlace)
+            }
+
+            if let interval = DateFormatting.localDayInterval(forDayKey: selectedDayKey) {
+                database.replaceDayRawData(samples: parsed.samples, visits: parsed.visits, in: interval)
+            }
+            database.replaceSegments(parsed.segments, forLocalDayKey: selectedDayKey)
+
+            let eventDates = parsed.segments.flatMap { [$0.startDate, $0.endDate] }
+            let utcKey = DateFormatting.resolvedUTCExportDayKey(
+                forLocalDayKey: selectedDayKey,
+                eventDates: eventDates
+            )
+            var record = reviewRecord ?? DayReviewRecord(localDayKey: selectedDayKey)
+            record.utcExportDateKey = utcKey
+            record.reviewedAt = Date()
+            database.upsertDayReview(record)
+            reviewRecord = record
+
+            reloadReferenceData()
+            rawSamples = parsed.samples
+            rawSampleCount = parsed.samples.count
+            segments = parsed.segments
+            hasUnsavedChanges = false
+            hasNewerRawDataThanSavedReview = false
+
+            if parsed.didOverrideDates, let srcDay = parsed.sourceDayKey {
+                statusBanner = "Imported \(parsed.segments.count) items (dates shifted \(srcDay) → \(selectedDayKey))"
+            } else {
+                statusBanner = "Imported \(parsed.segments.count) items onto \(selectedDayKey)"
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     // MARK: - Helpers
 
     private func reindexSortOrders() {

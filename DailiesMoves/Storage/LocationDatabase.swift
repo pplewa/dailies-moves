@@ -178,6 +178,73 @@ final class LocationDatabase: @unchecked Sendable {
         }
     }
 
+    /// Atomically replaces raw samples and visits within `interval` (used when importing a GPX onto a day).
+    func replaceDayRawData(
+        samples: [RawLocationSample],
+        visits: [RawVisitEvent],
+        in interval: DateInterval
+    ) {
+        queue.sync {
+            executeUnlocked("BEGIN IMMEDIATE TRANSACTION;")
+
+            if let delSamples = prepareUnlocked("DELETE FROM raw_samples WHERE timestamp >= ? AND timestamp < ?;") {
+                sqlite3_bind_double(delSamples, 1, interval.start.timeIntervalSince1970)
+                sqlite3_bind_double(delSamples, 2, interval.end.timeIntervalSince1970)
+                sqlite3_step(delSamples)
+                sqlite3_finalize(delSamples)
+            }
+
+            if let delVisits = prepareUnlocked("DELETE FROM raw_visits WHERE recorded_ts >= ? AND recorded_ts < ?;") {
+                sqlite3_bind_double(delVisits, 1, interval.start.timeIntervalSince1970)
+                sqlite3_bind_double(delVisits, 2, interval.end.timeIntervalSince1970)
+                sqlite3_step(delVisits)
+                sqlite3_finalize(delVisits)
+            }
+
+            let sampleSQL = """
+            INSERT INTO raw_samples (timestamp, latitude, longitude, h_acc, altitude, speed, course, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+            """
+            if let stmt = prepareUnlocked(sampleSQL) {
+                for s in samples {
+                    sqlite3_reset(stmt)
+                    sqlite3_clear_bindings(stmt)
+                    sqlite3_bind_double(stmt, 1, s.timestamp.timeIntervalSince1970)
+                    sqlite3_bind_double(stmt, 2, s.latitude)
+                    sqlite3_bind_double(stmt, 3, s.longitude)
+                    sqlite3_bind_double(stmt, 4, s.horizontalAccuracy)
+                    sqlite3_bind_double(stmt, 5, s.altitude)
+                    sqlite3_bind_double(stmt, 6, s.speed)
+                    sqlite3_bind_double(stmt, 7, s.course)
+                    sqlite3_bind_int(stmt, 8, Int32(s.source.rawValue))
+                    sqlite3_step(stmt)
+                }
+                sqlite3_finalize(stmt)
+            }
+
+            let visitSQL = """
+            INSERT INTO raw_visits (arrival_ts, departure_ts, latitude, longitude, h_acc, recorded_ts)
+            VALUES (?, ?, ?, ?, ?, ?);
+            """
+            if let stmt = prepareUnlocked(visitSQL) {
+                for v in visits {
+                    sqlite3_reset(stmt)
+                    sqlite3_clear_bindings(stmt)
+                    bindOptionalDouble(stmt, index: 1, value: v.arrivalDate?.timeIntervalSince1970)
+                    bindOptionalDouble(stmt, index: 2, value: v.departureDate?.timeIntervalSince1970)
+                    sqlite3_bind_double(stmt, 3, v.latitude)
+                    sqlite3_bind_double(stmt, 4, v.longitude)
+                    sqlite3_bind_double(stmt, 5, v.horizontalAccuracy)
+                    sqlite3_bind_double(stmt, 6, v.recordedAt.timeIntervalSince1970)
+                    sqlite3_step(stmt)
+                }
+                sqlite3_finalize(stmt)
+            }
+
+            executeUnlocked("COMMIT;")
+        }
+    }
+
     // MARK: - Raw Queries
 
     func fetchSamples(from start: Date, to end: Date) -> [RawLocationSample] {
